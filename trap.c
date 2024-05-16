@@ -7,6 +7,8 @@
 #include "x86.h"
 #include "traps.h"
 #include "spinlock.h"
+#include "vm.h"
+
 
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
@@ -36,6 +38,8 @@ idtinit(void)
 void
 trap(struct trapframe *tf)
 {
+  struct proc *p = myproc();
+        
   if(tf->trapno == T_SYSCALL){
     if(myproc()->killed)
       exit();
@@ -45,6 +49,20 @@ trap(struct trapframe *tf)
       exit();
     return;
   }
+  if (tf->trapno == T_PGFLT) {
+    if (pfh(tf->err) == -1) {
+      if(p == 0 || (tf->cs&3) == 0){
+        // 커널 모드에서 발생한 경우
+        cprintf("unexpected trap -> panic \n");
+        panic("trap");
+      }
+      // 유저 모드에서 발생한 경우
+      cprintf("page fault in user mode -> kill.\n");
+      p->killed = 1;
+    }
+    return;
+  }
+
 
   switch(tf->trapno){
   case T_IRQ0 + IRQ_TIMER:

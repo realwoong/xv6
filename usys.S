@@ -29,3 +29,10 @@ SYSCALL(getpid)
 SYSCALL(sbrk)
 SYSCALL(sleep)
 SYSCALL(uptime)
+
+//pa3
+SYSCALL(mmap)
+SYSCALL(munmap)
+SYSCALL(freemem)
+SYSCALL(pfh)
+

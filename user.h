@@ -37,3 +37,8 @@ void* memset(void*, int, uint);
 void* malloc(uint);
 void free(void*);
 int atoi(const char*);
+
+//pa3
+uint mmap(uint, int, int, int, int, int);
+int munmap(uint);
+uint freemem(void);

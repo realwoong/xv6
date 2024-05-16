@@ -103,6 +103,11 @@ extern int sys_unlink(void);
 extern int sys_wait(void);
 extern int sys_write(void);
 extern int sys_uptime(void);
+//pa3
+extern int sys_mmap(void);
+extern int sys_munmap(void);
+extern int sys_freemem(void);
+extern int sys_pfh(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -126,6 +131,10 @@ static int (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_mmap]    sys_mmap,
+[SYS_munmap]  sys_munmap,
+[SYS_freemem] sys_freemem,
+[SYS_pfh]   sys_pfh,
 };
 
 void

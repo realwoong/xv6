@@ -20,3 +20,9 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+
+// pa3
+#define SYS_mmap    22
+#define SYS_munmap  23
+#define SYS_freemem 24
+#define SYS_pfh   25

@@ -6,7 +6,14 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+//pa3
+#include "vm.h"
+#include "file.h"
+#include "spinlock.h"
+#include <stdbool.h>
+#include <stddef.h>
 
+int freememcount = 0;
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
 
@@ -32,7 +39,7 @@ seginit(void)
 // Return the address of the PTE in page table pgdir
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page table pages.
-static pte_t *
+pte_t *
 walkpgdir(pde_t *pgdir, const void *va, int alloc)
 {
   pde_t *pde;
@@ -57,7 +64,7 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa. va and size might not
 // be page-aligned.
-static int
+int
 mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
 {
   char *a, *last;
@@ -392,3 +399,233 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 //PAGEBREAK!
 // Blank page.
 
+//pa3
+struct {
+  struct spinlock lock;
+  struct mmap_area mmap_area[64];
+} mtable;
+void init_mtable(void) {
+  initlock(&mtable.lock, "mtable");
+  acquire(&mtable.lock);
+  for (int i = 0; i < 64; i++) {
+    mtable.mmap_area[i].p = 0;
+  }
+  release(&mtable.lock);
+}
+
+uint M2V(uint x) {
+  return x + MB;
+}
+
+uint V2M(uint x) {
+  return x - MB;
+}
+
+
+
+static struct mmap_area *get_mtable_entry(void) {
+  struct mmap_area *ret = NULL;
+  acquire(&mtable.lock);
+  
+  for (ret = mtable.mmap_area; ret < &mtable.mmap_area[64]; ret++) {
+    if (ret->p == NULL) {
+      release(&mtable.lock);
+      return ret;
+    }
+  }
+
+  release(&mtable.lock);
+  return NULL;
+}
+
+uint 
+mmap(uint addr, int length, int prot, int flags, int fd, int offset)
+{
+  struct proc *p = myproc();
+  struct mmap_area *m;
+  char *alloc;
+
+  // Check for MAP_ANONYMOUS and fd
+  if ((flags & MAP_ANONYMOUS) && fd != -1) {
+    return 0; // Error: Invalid combination of MAP_ANONYMOUS and fd
+  }
+
+  // Allocate mmap_area entry
+  m = get_mtable_entry();
+  if (m == 0) {
+    return 0; // Error: Not enough mtable entry
+  }
+
+  // Initialize mmap_area entry
+  m->fd = fd;
+  m->p = p;
+  m->addr = addr;
+  m->length = length;
+  m->prot = prot;
+  m->flags = flags;
+  m->f = 0;
+
+  // Handle MAP_ANONYMOUS
+  if (flags & MAP_ANONYMOUS) {
+    if (flags & MAP_POPULATE) {
+      for (uint i = M2V(addr); i < length + M2V(addr); i += PGSIZE) {
+        alloc = kalloc();
+        if (alloc == 0) {
+          return 0; // Error: Memory allocation failed
+        }
+        memset(alloc, 0, PGSIZE);
+        if (mappages(p->pgdir, (void*)i, PGSIZE, V2P(alloc), prot | PTE_U) < 0) {
+          kfree(alloc);
+          return 0; // Error: Mapping pages failed
+        }
+      }
+    }
+    return M2V(addr);
+  }
+
+  // Handle file mapping
+  struct file *f = p->ofile[fd];
+  if (f == 0 || ((prot & PROT_READ) && !f->readable) || ((prot & PROT_WRITE) && !f->writable)) {
+    return 0; // Error: Invalid file or access permissions
+  }
+  m->f = f;
+  m->offset = offset;
+
+  if (flags & MAP_POPULATE) {
+    f->off = offset;
+    for (uint i = M2V(addr); i < length + M2V(addr); i += PGSIZE) {
+      alloc = kalloc();
+      if (alloc == 0) {
+        return 0; // Error: Memory allocation failed
+      }
+      memset(alloc, 0, PGSIZE);
+      if (fileread(f, alloc, PGSIZE) < 0) {
+        kfree(alloc);
+        return 0; // Error: File read failed
+      }
+      if (mappages(p->pgdir, (void*)i, PGSIZE, V2P(alloc), prot | PTE_U) < 0) {
+        kfree(alloc);
+        return 0; // Error: Mapping pages failed
+      }
+    }
+    f->off = offset;
+  }
+
+  return M2V(addr);
+}
+
+
+/*
+uint 
+mmap(uint addr, int length, int prot, int flags, int fd, int offset)
+{
+        if(is_first){
+                return 1;}
+        return 0;
+}
+*/
+
+int
+munmap(uint addr)
+{
+  struct mmap_area *m = 0;
+  struct proc *p = myproc();
+  uint vaddr = V2M(addr);
+  pte_t *t;
+
+  acquire(&mtable.lock);
+
+  for (m = mtable.mmap_area; m < &mtable.mmap_area[64]; m++) {
+    if (m->addr == vaddr && m->p == p) {
+      break;
+    }
+  }
+
+  release(&mtable.lock);
+
+  if (m == 0 || m >= &mtable.mmap_area[64]) {
+    return -1; // Error: mmap_area not found
+  }
+
+  for (int i = 0; i < m->length; i += PGSIZE) {
+    t = walkpgdir(p->pgdir, (const void *)(addr + i), 0);
+    if (t && (*t & PTE_P)) {
+      kfree(P2V(PTE_ADDR(*t))); // Use PTE_ADDR to get the page address
+      *t = 0;
+    }
+  }
+
+  m->p = 0;
+  m->fd = 0;
+  m->f = 0;
+
+  return 1;
+}
+
+
+/*
+int
+munmap(uint real_addr)
+{
+        return 0;
+}
+*/
+
+int pfh(uint err)
+{
+    struct proc *p;
+    struct mmap_area *m = 0;
+    uint addr = PGROUNDDOWN(rcr2()); // 페이지 폴트가 발생한 주소를 가져와 페이지 크기로 내림
+    addr = V2M(addr); // 해당 주소를 매핑된 주소로 변환
+    p = myproc(); // 현재 프로세스를 가져옴
+
+    acquire(&mtable.lock);
+    // mmap_area에서 해당 주소가 포함된 영역을 찾음
+    for (m = mtable.mmap_area; m < &mtable.mmap_area[64]; m++) {
+        if (m->p == p && m->addr <= addr && addr < (m->addr + m->length)) {
+            break;
+        }
+    }
+    release(&mtable.lock);
+
+    // 매핑된 영역을 찾지 못한 경우
+    if (m == &mtable.mmap_area[64] || m->p != p) {
+        return -1; // 프로세스 종료
+    }
+
+    // 쓰기 보호를 확인
+    if (!(m->prot & PROT_WRITE) && (err & 0x2)) {
+        return -1; // 프로세스 종료
+    }
+
+    // 페이지를 물리 메모리로 매핑하고 초기화
+    char *alloc = kalloc(); // 새로운 페이지 할당
+    if (alloc == 0) {
+        return -1; // 프로세스 종료
+    }
+    memset(alloc, 0, PGSIZE); // 페이지 초기화
+
+    if (m->f) { // 파일 매핑인 경우
+        uint off = m->f->off;
+        m->f->off = m->offset + ((addr - m->addr <= 0) ? 0 : PGROUNDDOWN(addr - m->addr));
+        if (fileread(m->f, alloc, PGSIZE) < 0) {
+            kfree(alloc);
+            m->f->off = off; // 원래 파일 오프셋 복원
+            return -1; // 프로세스 종료
+        }
+        m->f->off = off; // 원래 파일 오프셋 복원
+    }
+
+    // 페이지 테이블에 매핑
+    if (mappages(p->pgdir, (void*)M2V(addr), PGSIZE, V2P(alloc), m->prot | PTE_U) < 0) {
+        kfree(alloc);
+        return -1; // 프로세스 종료
+    }
+
+    return 0; // 페이지 폴트 처리 성공
+}
+
+int freemem(void)
+{
+        return freememcount;
+}

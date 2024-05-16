@@ -6,6 +6,14 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "vm.h"
+#define NMMAP 64
+extern pte_t* walkpgdir(pde_t *pgdir, const void *va, int alloc);
+extern int mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
+extern struct {
+  struct spinlock lock;
+  struct mmap_area mmap_area[64];
+} mtable;
 
 struct {
   struct spinlock lock;
@@ -177,12 +185,124 @@ growproc(int n)
 // Create a new process copying p as the parent.
 // Sets up stack to return as if from system call.
 // Caller must set state of returned proc to RUNNABLE.
+static inline uint convert_addr_m_to_v(uint addr) {
+  return addr + MB;
+}
+
+static inline uint convert_addr_v_to_m(uint addr) {
+  return addr - MB;
+}
+
 int
 fork(void)
 {
   int i, pid;
   struct proc *np;
   struct proc *curproc = myproc();
+  struct mmap_area *new_mmap_area = 0;
+  struct mmap_area *old_mmap_area = 0;
+
+  // Allocate process.
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  // Copy process state from proc.
+  if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
+    kfree(np->kstack);
+    np->kstack = 0;
+    np->state = UNUSED;
+    return -1;
+  }
+
+  char *temp;
+  pte_t *pte;
+  uint pa;
+
+  // mmap 영역 복사
+  acquire(&mtable.lock);
+  for (old_mmap_area = mtable.mmap_area; old_mmap_area < &mtable.mmap_area[64]; old_mmap_area++) {
+    if (old_mmap_area->p == curproc && old_mmap_area->fork == 0) {
+      for (new_mmap_area = mtable.mmap_area; new_mmap_area < &mtable.mmap_area[64]; new_mmap_area++) {
+        if (new_mmap_area->p == 0) {
+          new_mmap_area->p = np;
+          new_mmap_area->addr = old_mmap_area->addr;
+          new_mmap_area->fd = old_mmap_area->fd;
+          if (old_mmap_area->f != 0)
+            new_mmap_area->f = np->ofile[new_mmap_area->fd];
+          else
+            new_mmap_area->f = 0;
+          new_mmap_area->flags = old_mmap_area->flags;
+          new_mmap_area->length = old_mmap_area->length;
+          new_mmap_area->offset = old_mmap_area->offset;
+          new_mmap_area->prot = old_mmap_area->prot;
+          new_mmap_area->fork = 1;
+
+          if (old_mmap_area->flags & MAP_POPULATE) {
+            for (int i = 0; i < old_mmap_area->length; i += PGSIZE) {
+              pte = walkpgdir(myproc()->pgdir, (const void*)(convert_addr_m_to_v(i + old_mmap_area->addr)), 0);
+              if (pte && (*pte & PTE_P)) {
+                pa = PTE_ADDR(*pte);
+                temp = kalloc();
+                memmove(temp, (const void*)P2V(pa), PGSIZE);
+                mappages(np->pgdir, (void*)convert_addr_m_to_v(new_mmap_area->addr + i), PGSIZE, V2P(temp), new_mmap_area->prot | PTE_U);
+              }
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+  release(&mtable.lock);
+
+  // reset_fork 기능을 직접 포함
+  struct mmap_area *m;
+  acquire(&mtable.lock);
+  for (m = mtable.mmap_area; m < &mtable.mmap_area[64]; m++) {
+    if (m->p && m->fork == 1) {
+      m->fork = 0;
+    }
+  }
+  release(&mtable.lock);
+
+  np->sz = curproc->sz;
+  np->parent = curproc;
+  *np->tf = *curproc->tf;
+
+  // Clear %eax so that fork returns 0 in the child.
+  np->tf->eax = 0;
+
+  for(i = 0; i < NOFILE; i++)
+    if(curproc->ofile[i])
+      np->ofile[i] = filedup(curproc->ofile[i]);
+  np->cwd = idup(curproc->cwd);
+
+  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+  pid = np->pid;
+
+  acquire(&ptable.lock);
+
+  np->state = RUNNABLE;
+
+  release(&ptable.lock);
+
+  return pid;
+}
+
+/*
+int
+fork(void)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *curproc = myproc();
+
+  //pa3
+  struct mmap_area *new_mmap_area;
+  struct mmap_area *old_mmap_area;
+
 
   // Allocate process.
   if((np = allocproc()) == 0){
@@ -220,10 +340,67 @@ fork(void)
 
   return pid;
 }
+*/
 
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait() to find out it exited.
+void
+exit(void)
+{
+  struct proc *curproc = myproc();
+  struct proc *p;
+  int fd;
+
+  if(curproc == initproc)
+    panic("init exiting");
+
+  // mmap 영역 해제
+  acquire(&mtable.lock);
+  struct mmap_area *m;
+  for (m = mtable.mmap_area; m < &mtable.mmap_area[NMMAP]; m++) {
+    if (m->p == curproc) {
+      munmap(convert_addr_m_to_v(m->addr));
+      m->p = 0;
+      m->fork = 0;
+    }
+  }
+  release(&mtable.lock);
+
+  // Close all open files.
+  for(fd = 0; fd < NOFILE; fd++){
+    if(curproc->ofile[fd]){
+      fileclose(curproc->ofile[fd]);
+      curproc->ofile[fd] = 0;
+    }
+  }
+
+  begin_op();
+  iput(curproc->cwd);
+  end_op();
+  curproc->cwd = 0;
+
+  acquire(&ptable.lock);
+
+  // Parent might be sleeping in wait().
+  wakeup1(curproc->parent);
+
+  // Pass abandoned children to init.
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->parent == curproc){
+      p->parent = initproc;
+      if(p->state == ZOMBIE)
+        wakeup1(initproc);
+    }
+  }
+
+  // Jump into the scheduler, never to return.
+  curproc->state = ZOMBIE;
+  sched();
+  panic("zombie exit");
+}
+
+/*
 void
 exit(void)
 {
@@ -266,7 +443,7 @@ exit(void)
   sched();
   panic("zombie exit");
 }
-
+*/
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
@@ -488,6 +665,19 @@ kill(int pid)
       // Wake process from sleep if necessary.
       if(p->state == SLEEPING)
         p->state = RUNNABLE;
+
+      // mmap 영역 해제
+      acquire(&mtable.lock);
+      struct mmap_area *m;
+      for (m = mtable.mmap_area; m < &mtable.mmap_area[NMMAP]; m++) {
+        if (m->p == p) {
+          munmap(convert_addr_m_to_v(m->addr));
+          m->p = 0;
+          m->fork = 0;
+        }
+      }
+      release(&mtable.lock);
+
       release(&ptable.lock);
       return 0;
     }
@@ -495,7 +685,29 @@ kill(int pid)
   release(&ptable.lock);
   return -1;
 }
+/*
+int
+kill(int pid)
+{
+  struct proc *p;
+  struct mmap_area *m;
 
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid){
+      p->killed = 1;
+      // Wake process from sleep if necessary.
+      if(p->state == SLEEPING)
+        p->state = RUNNABLE;
+      release(&ptable.lock);
+      return 0;
+
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+*/
 //PAGEBREAK: 36
 // Print a process listing to console.  For debugging.
 // Runs when user types ^P on console.
