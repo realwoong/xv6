@@ -1,3 +1,5 @@
+#define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
 struct buf;
 struct context;
 struct file;
@@ -193,5 +195,5 @@ uint            mmap(uint, int, int, int, int, int);
 int             munmap(uint); 
 int             pfh(uint); 
 int             freemem(void); 
-// number of elements in fixed-size array
-#define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+

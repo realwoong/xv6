@@ -38,8 +38,7 @@ idtinit(void)
 void
 trap(struct trapframe *tf)
 {
-  struct proc *p = myproc();
-        
+
   if(tf->trapno == T_SYSCALL){
     if(myproc()->killed)
       exit();
@@ -49,22 +48,10 @@ trap(struct trapframe *tf)
       exit();
     return;
   }
-  if (tf->trapno == T_PGFLT) {
-    if (pfh(tf->err) == -1) {
-      if(p == 0 || (tf->cs&3) == 0){
-        // ì»¤ë„ ëª¨ë“œì—ì„œ ë°œìƒí•œ ê²½ìš°
-        cprintf("unexpected trap -> panic \n");
-        panic("trap");
-      }
-      // ìœ ì € ëª¨ë“œì—ì„œ ë°œìƒí•œ ê²½ìš°
-      cprintf("page fault in user mode -> kill.\n");
-      p->killed = 1;
-    }
-    return;
-  }
 
 
   switch(tf->trapno){
+  
   case T_IRQ0 + IRQ_TIMER:
     if(cpuid() == 0){
       acquire(&tickslock);
@@ -72,8 +59,46 @@ trap(struct trapframe *tf)
       wakeup(&ticks);
       release(&tickslock);
     }
+    
     lapiceoi();
     break;
+  case T_PGFLT: // ÆäÀÌÁö ÆúÆ® ÇÚµé·¯ È£Ãâ
+    if (pfh(tf->err) == -1) {
+      if(myproc() == 0 || (tf->cs&3) == 0){
+        // In kernel, it must be our mistake.
+        cprintf("unexpected trap %d from cpu %d eip %x (cr2=0x%x)\n",
+                tf->trapno, cpuid(), tf->eip, rcr2());
+        panic("trap");
+      }
+      // In user space, assume process misbehaved.
+      cprintf("pid %d %s: trap %d err %d on cpu %d "
+              "eip 0x%x addr 0x%x--kill proc\n",
+              myproc()->pid, myproc()->name, tf->trapno,
+              tf->err, cpuid(), tf->eip, rcr2());
+      myproc()->killed = 1;
+
+        // Force process exit if it has been killed and is in user space.
+  // (If it is still executing in the kernel, let it keep running
+  // until it gets to the regular system call return.)
+  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+    exit();
+
+  // Force process to give up CPU on clock tick.
+  // If interrupts were on while locks held, would need to check nlock.
+  if(myproc() && myproc()->state == RUNNING &&
+     tf->trapno == T_IRQ0+IRQ_TIMER)
+    yield();
+
+  // Check if the process has been killed since we yielded
+  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+    exit();
+
+
+
+    }
+    
+    return; // ÆäÀÌÁö ÆúÆ®¸¦ ¼º°øÀûÀ¸·Î Ã³¸®ÇÑ °æ¿ì
+
   case T_IRQ0 + IRQ_IDE:
     ideintr();
     lapiceoi();
@@ -96,6 +121,7 @@ trap(struct trapframe *tf)
     lapiceoi();
     break;
 
+  
   //PAGEBREAK: 13
   default:
     if(myproc() == 0 || (tf->cs&3) == 0){

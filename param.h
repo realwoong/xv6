@@ -18,3 +18,4 @@
 #define MAP_ANONYMOUS	0x1		
 #define MAP_POPULATE	0x2		
 #define MB        0x40000000 
+#define PGSIZE 4096

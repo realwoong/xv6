@@ -6,6 +6,7 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+
 //pa3
 #include "vm.h"
 #include "file.h"
@@ -392,13 +393,6 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
   return 0;
 }
 
-//PAGEBREAK!
-// Blank page.
-//PAGEBREAK!
-// Blank page.
-//PAGEBREAK!
-// Blank page.
-
 //pa3
 struct {
   struct spinlock lock;
@@ -413,14 +407,6 @@ void init_mtable(void) {
   release(&mtable.lock);
 }
 
-uint M2V(uint x) {
-  return x + MB;
-}
-
-uint V2M(uint x) {
-  return x - MB;
-}
-
 
 
 static struct mmap_area *get_mtable_entry(void) {
@@ -430,6 +416,7 @@ static struct mmap_area *get_mtable_entry(void) {
   for (ret = mtable.mmap_area; ret < &mtable.mmap_area[64]; ret++) {
     if (ret->p == NULL) {
       release(&mtable.lock);
+      ret->fork = 0;
       return ret;
     }
   }
@@ -445,18 +432,29 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
   struct mmap_area *m;
   char *alloc;
 
-  // Check for MAP_ANONYMOUS and fd
+  if (addr % PGSIZE != 0) {
+        return 0; 
+    }
+
+    if (length % PGSIZE != 0) {
+        return 0; 
+    }
+
+    if (prot != PROT_READ && prot != (PROT_READ | PROT_WRITE)) {
+        return 0; 
+    }
+
+
   if ((flags & MAP_ANONYMOUS) && fd != -1) {
     return 0; // Error: Invalid combination of MAP_ANONYMOUS and fd
   }
 
-  // Allocate mmap_area entry
+  // ¿¡·¯Åë°ú
   m = get_mtable_entry();
   if (m == 0) {
     return 0; // Error: Not enough mtable entry
   }
 
-  // Initialize mmap_area entry
   m->fd = fd;
   m->p = p;
   m->addr = addr;
@@ -468,7 +466,7 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
   // Handle MAP_ANONYMOUS
   if (flags & MAP_ANONYMOUS) {
     if (flags & MAP_POPULATE) {
-      for (uint i = M2V(addr); i < length + M2V(addr); i += PGSIZE) {
+      for (uint i = (addr + 0x40000000); i < length + (addr + 0x40000000); i += PGSIZE) {
         alloc = kalloc();
         if (alloc == 0) {
           return 0; // Error: Memory allocation failed
@@ -480,7 +478,7 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
         }
       }
     }
-    return M2V(addr);
+    return (addr + 0x40000000);
   }
 
   // Handle file mapping
@@ -493,7 +491,7 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
 
   if (flags & MAP_POPULATE) {
     f->off = offset;
-    for (uint i = M2V(addr); i < length + M2V(addr); i += PGSIZE) {
+    for (uint i = (addr + 0x40000000); i < length + (addr + 0x40000000); i += PGSIZE) {
       alloc = kalloc();
       if (alloc == 0) {
         return 0; // Error: Memory allocation failed
@@ -511,27 +509,22 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
     f->off = offset;
   }
 
-  return M2V(addr);
+  return (addr + 0x40000000);
 }
 
-
-/*
-uint 
-mmap(uint addr, int length, int prot, int flags, int fd, int offset)
-{
-        if(is_first){
-                return 1;}
-        return 0;
-}
-*/
 
 int
 munmap(uint addr)
 {
   struct mmap_area *m = 0;
   struct proc *p = myproc();
-  uint vaddr = V2M(addr);
+  uint vaddr = addr - 0x40000000;
   pte_t *t;
+
+  if (addr % PGSIZE != 0) {
+    return -1; // Error: addr is not page-aligned
+  }
+
 
   acquire(&mtable.lock);
 
@@ -563,24 +556,17 @@ munmap(uint addr)
 }
 
 
-/*
-int
-munmap(uint real_addr)
-{
-        return 0;
-}
-*/
 
 int pfh(uint err)
 {
     struct proc *p;
     struct mmap_area *m = 0;
-    uint addr = PGROUNDDOWN(rcr2()); // í˜ì´ì§€ í´íŠ¸ê°€ ë°œìƒí•œ ì£¼ì†Œë¥¼ ê°€ì ¸ì™€ í˜ì´ì§€ í¬ê¸°ë¡œ ë‚´ë¦¼
-    addr = V2M(addr); // í•´ë‹¹ ì£¼ì†Œë¥¼ ë§¤í•‘ëœ ì£¼ì†Œë¡œ ë³€í™˜
-    p = myproc(); // í˜„ì¬ í”„ë¡œì„¸ìŠ¤ë¥¼ ê°€ì ¸ì˜´
+    uint addr = PGROUNDDOWN(rcr2()); // ÆäÀÌÁö ÆúÆ®°¡ ¹ß»ıÇÑ ÁÖ¼Ò¸¦ °¡Á®¿Í ÆäÀÌÁö Å©±â·Î ³»¸²
+    addr = addr - 0x40000000; // ÇØ´ç ÁÖ¼Ò¸¦ ¸ÅÇÎµÈ ÁÖ¼Ò·Î º¯È¯
+    p = myproc(); // ÇöÀç ÇÁ·Î¼¼½º¸¦ °¡Á®¿È
 
     acquire(&mtable.lock);
-    // mmap_areaì—ì„œ í•´ë‹¹ ì£¼ì†Œê°€ í¬í•¨ëœ ì˜ì—­ì„ ì°¾ìŒ
+    // mmap_area¿¡¼­ ÇØ´ç ÁÖ¼Ò°¡ Æ÷ÇÔµÈ ¿µ¿ªÀ» Ã£À½
     for (m = mtable.mmap_area; m < &mtable.mmap_area[64]; m++) {
         if (m->p == p && m->addr <= addr && addr < (m->addr + m->length)) {
             break;
@@ -588,42 +574,56 @@ int pfh(uint err)
     }
     release(&mtable.lock);
 
-    // ë§¤í•‘ëœ ì˜ì—­ì„ ì°¾ì§€ ëª»í•œ ê²½ìš°
+
+    // ¸ÅÇÎµÈ ¿µ¿ªÀ» Ã£Áö ¸øÇÑ °æ¿ì
     if (m == &mtable.mmap_area[64] || m->p != p) {
-        return -1; // í”„ë¡œì„¸ìŠ¤ ì¢…ë£Œ
+        //cprintf("____pa3 : fail : 01\n");
+        return -1; // ÇÁ·Î¼¼½º Á¾·á
     }
 
-    // ì“°ê¸° ë³´í˜¸ë¥¼ í™•ì¸
+    // ¾²±â º¸È£¸¦ È®ÀÎ
     if (!(m->prot & PROT_WRITE) && (err & 0x2)) {
-        return -1; // í”„ë¡œì„¸ìŠ¤ ì¢…ë£Œ
+        //cprintf("____pa3 : fail : 02\n");
+        return -1; // ÇÁ·Î¼¼½º Á¾·á
     }
 
-    // í˜ì´ì§€ë¥¼ ë¬¼ë¦¬ ë©”ëª¨ë¦¬ë¡œ ë§¤í•‘í•˜ê³  ì´ˆê¸°í™”
-    char *alloc = kalloc(); // ìƒˆë¡œìš´ í˜ì´ì§€ í• ë‹¹
+    // ÆäÀÌÁö¸¦ ÇÒ´çÇÏ°í ÃÊ±âÈ­
+    char *alloc = kalloc(); // »õ·Î¿î ÆäÀÌÁö ÇÒ´ç
     if (alloc == 0) {
-        return -1; // í”„ë¡œì„¸ìŠ¤ ì¢…ë£Œ
+        //cprintf("____pa3 : fail : 03\n");
+        return -1; // ÇÁ·Î¼¼½º Á¾·á
     }
-    memset(alloc, 0, PGSIZE); // í˜ì´ì§€ ì´ˆê¸°í™”
+    memset(alloc, 0, PGSIZE); // ÆäÀÌÁö ÃÊ±âÈ­
 
-    if (m->f) { // íŒŒì¼ ë§¤í•‘ì¸ ê²½ìš°
+    if (m->f) { // ÆÄÀÏ ¸ÅÇÎÀÎ °æ¿ì
         uint off = m->f->off;
-        m->f->off = m->offset + ((addr - m->addr <= 0) ? 0 : PGROUNDDOWN(addr - m->addr));
-        if (fileread(m->f, alloc, PGSIZE) < 0) {
+        uint new_off = m->offset + ((addr - m->addr <= 0) ? 0 : PGROUNDDOWN(addr - m->addr));
+        m->f->off = new_off;
+        
+        //cprintf("____pa3 : fileread offset: %d\n", new_off); // µğ¹ö±× ·Î±× Ãß°¡
+        int read_res = fileread(m->f, alloc, PGSIZE);
+        //cprintf("____pa3 : fileread result: %d\n", read_res); // µğ¹ö±× ·Î±× Ãß°¡
+        
+        if (read_res < 0) {
             kfree(alloc);
-            m->f->off = off; // ì›ë˜ íŒŒì¼ ì˜¤í”„ì…‹ ë³µì›
-            return -1; // í”„ë¡œì„¸ìŠ¤ ì¢…ë£Œ
+            m->f->off = off; // ¿ø·¡ ÆÄÀÏ ¿ÀÇÁ¼Â º¹¿ø
+            //cprintf("____pa3 : fail : 04\n");
+            return -1; // ÇÁ·Î¼¼½º Á¾·á
         }
-        m->f->off = off; // ì›ë˜ íŒŒì¼ ì˜¤í”„ì…‹ ë³µì›
+        m->f->off = off; // ¿ø·¡ ÆÄÀÏ ¿ÀÇÁ¼Â º¹¿ø
     }
 
-    // í˜ì´ì§€ í…Œì´ë¸”ì— ë§¤í•‘
-    if (mappages(p->pgdir, (void*)M2V(addr), PGSIZE, V2P(alloc), m->prot | PTE_U) < 0) {
+    // ÆäÀÌÁö Å×ÀÌºí¿¡ ¸ÅÇÎ
+    if (mappages(p->pgdir, (void*)(addr + 0x40000000), PGSIZE, V2P(alloc), m->prot | PTE_U) < 0) {
         kfree(alloc);
-        return -1; // í”„ë¡œì„¸ìŠ¤ ì¢…ë£Œ
+        //cprintf("____pa3 : fail : 05\n");
+        return -1; // ÇÁ·Î¼¼½º Á¾·á
     }
 
-    return 0; // í˜ì´ì§€ í´íŠ¸ ì²˜ë¦¬ ì„±ê³µ
+    //cprintf("____pa3 : success : 01\n");
+    return 0; // ÆäÀÌÁö ÆúÆ® Ã³¸® ¼º°ø
 }
+
 
 int freemem(void)
 {

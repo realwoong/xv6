@@ -34,7 +34,6 @@ kinit1(void *vstart, void *vend)
 {
   initlock(&kmem.lock, "kmem");
   kmem.use_lock = 0;
-  freememcount = 0;
   freerange(vstart, vend);
 }
 
@@ -93,6 +92,7 @@ kalloc(void)
   if(r)
     kmem.freelist = r->next;
   freememcount--;
+  //cprintf("____pa3: %d\n", freememcount);
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;

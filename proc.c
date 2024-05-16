@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "spinlock.h"
 #include "vm.h"
+
 #define NMMAP 64
 extern pte_t* walkpgdir(pde_t *pgdir, const void *va, int alloc);
 extern int mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
@@ -219,7 +220,6 @@ fork(void)
   pte_t *pte;
   uint pa;
 
-  // mmap ÏòÅÏó≠ Î≥µÏÇ¨
   acquire(&mtable.lock);
   for (old_mmap_area = mtable.mmap_area; old_mmap_area < &mtable.mmap_area[64]; old_mmap_area++) {
     if (old_mmap_area->p == curproc && old_mmap_area->fork == 0) {
@@ -256,7 +256,6 @@ fork(void)
   }
   release(&mtable.lock);
 
-  // reset_fork Í∏∞Îä•ÏùÑ ÏßÅÏ†ë Ìè¨Ìï®
   struct mmap_area *m;
   acquire(&mtable.lock);
   for (m = mtable.mmap_area; m < &mtable.mmap_area[64]; m++) {
@@ -270,7 +269,6 @@ fork(void)
   np->parent = curproc;
   *np->tf = *curproc->tf;
 
-  // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
 
   for(i = 0; i < NOFILE; i++)
@@ -291,63 +289,12 @@ fork(void)
   return pid;
 }
 
-/*
-int
-fork(void)
-{
-  int i, pid;
-  struct proc *np;
-  struct proc *curproc = myproc();
-
-  //pa3
-  struct mmap_area *new_mmap_area;
-  struct mmap_area *old_mmap_area;
 
 
-  // Allocate process.
-  if((np = allocproc()) == 0){
-    return -1;
-  }
-
-  // Copy process state from proc.
-  if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
-    kfree(np->kstack);
-    np->kstack = 0;
-    np->state = UNUSED;
-    return -1;
-  }
-  np->sz = curproc->sz;
-  np->parent = curproc;
-  *np->tf = *curproc->tf;
-
-  // Clear %eax so that fork returns 0 in the child.
-  np->tf->eax = 0;
-
-  for(i = 0; i < NOFILE; i++)
-    if(curproc->ofile[i])
-      np->ofile[i] = filedup(curproc->ofile[i]);
-  np->cwd = idup(curproc->cwd);
-
-  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
-
-  pid = np->pid;
-
-  acquire(&ptable.lock);
-
-  np->state = RUNNABLE;
-
-  release(&ptable.lock);
-
-  return pid;
-}
-*/
-
-// Exit the current process.  Does not return.
-// An exited process remains in the zombie state
-// until its parent calls wait() to find out it exited.
 void
 exit(void)
 {
+  
   struct proc *curproc = myproc();
   struct proc *p;
   int fd;
@@ -355,26 +302,28 @@ exit(void)
   if(curproc == initproc)
     panic("init exiting");
 
-  // mmap ÏòÅÏó≠ Ìï¥Ï†ú
+  // Close all open files.
+  for(fd = 0; fd < NOFILE; fd++){
+    if(curproc->ofile[fd]){
+      fileclose(curproc->ofile[fd]);
+      curproc->ofile[fd] = 0;
+    }
+  }
+
   acquire(&mtable.lock);
   struct mmap_area *m;
   for (m = mtable.mmap_area; m < &mtable.mmap_area[NMMAP]; m++) {
     if (m->p == curproc) {
-      munmap(convert_addr_m_to_v(m->addr));
+      uint addr = convert_addr_m_to_v(m->addr);
       m->p = 0;
       m->fork = 0;
+      release(&mtable.lock); // ¿·±› «ÿ¡¶ »ƒ munmap »£√‚
+      munmap(addr);
+      acquire(&mtable.lock); // ¥ŸΩ√ ¿·±› »πµÊ
     }
   }
   release(&mtable.lock);
 
-  // Close all open files.
-  for(fd = 0; fd < NOFILE; fd++){
-    if(curproc->ofile[fd]){
-      fileclose(curproc->ofile[fd]);
-      curproc->ofile[fd] = 0;
-    }
-  }
-
   begin_op();
   iput(curproc->cwd);
   end_op();
@@ -400,52 +349,7 @@ exit(void)
   panic("zombie exit");
 }
 
-/*
-void
-exit(void)
-{
-  struct proc *curproc = myproc();
-  struct proc *p;
-  int fd;
 
-  if(curproc == initproc)
-    panic("init exiting");
-
-  // Close all open files.
-  for(fd = 0; fd < NOFILE; fd++){
-    if(curproc->ofile[fd]){
-      fileclose(curproc->ofile[fd]);
-      curproc->ofile[fd] = 0;
-    }
-  }
-
-  begin_op();
-  iput(curproc->cwd);
-  end_op();
-  curproc->cwd = 0;
-
-  acquire(&ptable.lock);
-
-  // Parent might be sleeping in wait().
-  wakeup1(curproc->parent);
-
-  // Pass abandoned children to init.
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(p->parent == curproc){
-      p->parent = initproc;
-      if(p->state == ZOMBIE)
-        wakeup1(initproc);
-    }
-  }
-
-  // Jump into the scheduler, never to return.
-  curproc->state = ZOMBIE;
-  sched();
-  panic("zombie exit");
-}
-*/
-// Wait for a child process to exit and return its pid.
-// Return -1 if this process has no children.
 int
 wait(void)
 {
@@ -666,8 +570,6 @@ kill(int pid)
       if(p->state == SLEEPING)
         p->state = RUNNABLE;
 
-      // mmap ÏòÅÏó≠ Ìï¥Ï†ú
-      acquire(&mtable.lock);
       struct mmap_area *m;
       for (m = mtable.mmap_area; m < &mtable.mmap_area[NMMAP]; m++) {
         if (m->p == p) {
@@ -676,7 +578,6 @@ kill(int pid)
           m->fork = 0;
         }
       }
-      release(&mtable.lock);
 
       release(&ptable.lock);
       return 0;
@@ -685,29 +586,7 @@ kill(int pid)
   release(&ptable.lock);
   return -1;
 }
-/*
-int
-kill(int pid)
-{
-  struct proc *p;
-  struct mmap_area *m;
 
-  acquire(&ptable.lock);
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(p->pid == pid){
-      p->killed = 1;
-      // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
-        p->state = RUNNABLE;
-      release(&ptable.lock);
-      return 0;
-
-    }
-  }
-  release(&ptable.lock);
-  return -1;
-}
-*/
 //PAGEBREAK: 36
 // Print a process listing to console.  For debugging.
 // Runs when user types ^P on console.
